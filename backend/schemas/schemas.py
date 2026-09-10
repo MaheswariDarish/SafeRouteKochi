@@ -194,6 +194,33 @@ class EventReportInput(BaseModel):
     detail: str = ""
 
 
+# --- Live reports ("happening right now" — short-lived, geo-tagged) ---
+
+LiveCategory = Literal[
+    # alerts — routing-relevant, shown red/amber
+    "flooding", "accident", "road_blocked", "protest_crowd",
+    "police_activity", "harassment", "hazard", "power_cut",
+    # vibes — social only, never touch the safety score
+    "street_food", "live_music", "festival", "market", "good_view", "screening",
+    "other",
+]
+
+
+class NewLiveReportInput(BaseModel):
+    """Payload from the 'report something happening now' form. Identity comes
+    from the signed-in user / dev header, never the body."""
+    lat: float
+    lng: float
+    category: LiveCategory
+    note: str = Field("", max_length=400)
+    visibility: Literal["public", "anonymous"] = "public"
+
+
+class LiveCommentInput(BaseModel):
+    text: str = Field(..., min_length=1, max_length=300)
+    visibility: Literal["public", "anonymous"] = "public"
+
+
 class SegmentScoreBreakdown(BaseModel):
     segment_id: str
     road_name: str

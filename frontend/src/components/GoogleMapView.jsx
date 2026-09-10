@@ -54,9 +54,12 @@ export default function GoogleMapView({
   showPotholeZones = false,
   showRatings = false,
   ratingsReloadKey = 0,
+  showLive = false,
+  liveReloadKey = 0,
   onMapClick,
   onFeatureClick,
   onSpotClick,
+  onLiveClick,
   onEventClick,
   onRouteSelect,
   markerLocation,
@@ -75,10 +78,13 @@ export default function GoogleMapView({
   const heatmapRef = useRef(null);
   const zoneCirclesRef = useRef([]);
   const spotObjectsRef = useRef([]);
+  const liveObjectsRef = useRef([]);
   const onSpotClickRef = useRef(onSpotClick);
+  const onLiveClickRef = useRef(onLiveClick);
   useEffect(() => {
     onSpotClickRef.current = onSpotClick;
-  }, [onSpotClick]);
+    onLiveClickRef.current = onLiveClick;
+  }, [onSpotClick, onLiveClick]);
 
   useEffect(() => {
     if (map && window.google?.maps?.places && onPlacesServiceReady) {
@@ -214,6 +220,65 @@ export default function GoogleMapView({
     // onSpotClick intentionally omitted — an inline parent callback would
     // otherwise re-fetch the layer on every render.
   }, [map, showRatings, ratingsReloadKey]);
+
+  // Live "happening now" reports — polled every 30s while the layer is on
+  // (or a route is active, so alerts on the way show up).
+  useEffect(() => {
+    const g = window.google?.maps;
+    if (!map) return undefined;
+
+    const teardown = () => {
+      liveObjectsRef.current.forEach((o) => o.setMap(null));
+      liveObjectsRef.current = [];
+    };
+    teardown();
+    if (!showLive) return teardown;
+
+    let cancelled = false;
+    const draw = (reports) => {
+      teardown();
+      if (cancelled || !Array.isArray(reports)) return;
+      liveObjectsRef.current = reports.map((r) => {
+        const alert = r.group === 'alert';
+        const colour = alert ? '#d93025' : '#1e8e3e';
+        const life = (r.minutes_left ?? 0) + (r.age_min ?? 0) || 1;
+        const fresh = Math.max(0, Math.min(1, (r.minutes_left ?? 0) / life));
+        const marker = new g.Marker({
+          map,
+          position: { lat: r.lat, lng: r.lng },
+          zIndex: 40,
+          opacity: 0.45 + 0.55 * fresh,
+          icon: {
+            path: g.SymbolPath.CIRCLE,
+            scale: alert ? 9 : 7,
+            fillColor: colour,
+            fillOpacity: 1,
+            strokeColor: '#fff',
+            strokeWeight: 2,
+          },
+          title: `${r.category_label} · ${
+            r.age_min < 1 ? 'just now' : `${r.age_min} min ago`
+          }${r.note ? ` — ${r.note}` : ''}`,
+        });
+        marker.addListener('click', () => onLiveClickRef.current && onLiveClickRef.current(r));
+        return marker;
+      });
+    };
+
+    const poll = () =>
+      fetch('/api/live')
+        .then((res) => res.json())
+        .then((d) => draw(d.reports))
+        .catch(() => {});
+    poll();
+    const t = setInterval(poll, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      teardown();
+    };
+  }, [map, showLive, liveReloadKey]);
 
   // Route polylines + origin/destination markers are managed imperatively —
   // @react-google-maps/api's <Polyline> is unreliable about removing itself

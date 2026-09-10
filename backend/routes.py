@@ -15,8 +15,10 @@ from safety_spots import (
     resolve_spot,
     spot_containing_rating,
     all_spots,
+    spots_along_route,
     SPOT_JOIN_RADIUS_M,
 )
+import live_reports as live
 from agent.scoring_engine import (
     score_route,
     score_segment,
@@ -40,6 +42,10 @@ from data.data_access import (
     get_all_ratings,
     create_rating,
     update_rating,
+    get_all_live_reports,
+    get_live_report,
+    create_live_report,
+    update_live_report,
     get_all_community_events,
     get_community_event,
     create_community_event,
@@ -60,6 +66,8 @@ from schemas.schemas import (
     NewEventInput,
     EventReportInput,
     NewRatingInput,
+    NewLiveReportInput,
+    LiveCommentInput,
 )
 
 UPLOAD_DIR = Path(__file__).resolve().parent / "data" / "uploads" / "events"
@@ -408,12 +416,30 @@ def _find_safe_corridor(input_data: WaypointRouteInput):
         f for f in get_all_features()
         if f.get("status") == "verified" and f.get("type") != "police_station"
     ]
+    all_ratings = get_all_ratings()
+    all_live = get_all_live_reports()
     for r in routes_found:
         cond = route_condition_penalty(r.get("polyline", ""), verified_features)
         r["safety_score"] = round(max(0.0, r["safety_score"] - cond["penalty"]), 1)
         r["pothole_count"] = cond["pothole_count"]
         r["condition_penalty"] = cond["penalty"]
         r["condition_notes"] = cond["notes"]
+
+        # Subjective rating spots that lie on this route (display only — they
+        # don't move the score). Worst-felt spot first, with every comment.
+        spots = spots_along_route(r.get("polyline", ""), all_ratings, input_data.hour)
+        r["rating_spots"] = spots
+        rated = [s for s in spots if s.get("mean") is not None]
+        r["rating_spot_count"] = len(spots)
+        r["rating_low_count"] = sum(1 for s in rated if s["mean"] < 2.5)
+        r["rating_mean"] = (
+            round(sum(s["mean"] for s in rated) / len(rated), 1) if rated else None
+        )
+
+        # Live "happening now" alerts on this route (display only, newest first).
+        alerts = live.alerts_along_route(r.get("polyline", ""), all_live)
+        r["live_alerts"] = alerts
+        r["live_alert_count"] = len(alerts)
 
     routes_found.sort(key=lambda r: r["safety_score"], reverse=True)
     route_b = routes_found[0]
@@ -1000,6 +1026,104 @@ def list_ratings(lat: float = Query(...), lng: float = Query(...),
               else (r.get("contributor") or {}).get("name") or r.get("contributed_by") or "Anonymous",
         "at": r.get("created_at"),
     } for r in near]
+
+
+# --- Live reports ("happening now") ---
+
+@router.get("/live/categories")
+def live_categories():
+    return [
+        {"key": k, "label": lbl, "group": grp, "ttl_hours": ttl}
+        for k, (lbl, grp, ttl) in live.LIVE_CATEGORIES.items()
+    ]
+
+
+@router.get("/live")
+def list_live(bbox: Optional[str] = Query(None, description="min_lng,min_lat,max_lng,max_lat"),
+              since: Optional[str] = Query(None, description="ISO cursor — only reports updated after this")):
+    """Active (non-expired, non-cleared) reports. Poll this; `cursor` in the
+    response is the value to pass as `since` next time. SSE can layer on later
+    without changing the shape."""
+    reports = get_all_live_reports()
+    if bbox:
+        try:
+            parts = [float(x) for x in bbox.split(",")]
+            if len(parts) == 4:
+                reports = live.in_bbox(reports, tuple(parts))
+        except ValueError:
+            pass
+    out = live.active_decorated(reports)
+    if since:
+        out = [r for r in out if (r.get("updated_at") or "") > since]
+    return {
+        "reports": out,
+        "cursor": datetime.now(timezone.utc).isoformat(),
+        "count": len(out),
+    }
+
+
+@router.post("/live")
+def add_live_report(payload: NewLiveReportInput, user: dict = Depends(get_current_user)):
+    contributor = _record_contributor(user)
+    data = payload.model_dump()
+    report = create_live_report({
+        **data,
+        "expires_at": live.initial_expiry(data["category"]),
+        "contributor": contributor,
+        "contributed_by": _feature_display_name(contributor, data.get("visibility", "public")),
+    })
+    return live.decorate(report)
+
+
+@router.post("/live/{report_id}/still-here")
+def confirm_live_report(report_id: str, user: dict = Depends(get_current_user)):
+    """'Still happening' — bumps the report's expiry back out (capped)."""
+    r = get_live_report(report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    voters = list(r.get("still_there_by", []))
+    uid = user["uid"]
+    if uid and uid != "anon" and uid not in voters:
+        voters.append(uid)
+    updated = update_live_report(report_id, {
+        "still_there": len(voters),
+        "still_there_by": voters,
+        "expires_at": live.bumped_expiry(r),
+        "cleared": False,
+    })
+    return live.decorate(updated)
+
+
+@router.post("/live/{report_id}/clear")
+def clear_live_report(report_id: str, user: dict = Depends(get_current_user)):
+    """'Not anymore' — hides the report immediately."""
+    r = get_live_report(report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    updated = update_live_report(report_id, {
+        "cleared": True,
+        "cleared_by": user.get("name"),
+        "cleared_uid": user["uid"],
+    })
+    return live.decorate(updated)
+
+
+@router.post("/live/{report_id}/comment")
+def comment_live_report(report_id: str, payload: LiveCommentInput,
+                        user: dict = Depends(get_current_user)):
+    r = get_live_report(report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    contributor = _record_contributor(user)
+    comment = {
+        "text": payload.text.strip(),
+        "visibility": payload.visibility,
+        "contributor": contributor,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    comments = list(r.get("comments", [])) + [comment]
+    updated = update_live_report(report_id, {"comments": comments})
+    return live.decorate(updated)
 
 
 # --- Place context (hybrid: reverse geocode + local safety data) ---

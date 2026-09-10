@@ -8,6 +8,7 @@ import {
   CalendarDays,
   TriangleAlert,
   Users,
+  Radio,
 } from 'lucide-react';
 
 export default function MapLayersFab({
@@ -25,6 +26,9 @@ export default function MapLayersFab({
   onTogglePotholeZones,
   showRatings,
   onToggleRatings,
+  showLive,
+  onToggleLive,
+  onOpenLive,
   onOpenEvents,
   onOpenReport,
 }) {
@@ -79,6 +83,14 @@ export default function MapLayersFab({
         <span>Safety ratings</span>
       </button>
       <button
+        className={`gm-layer-btn ${showLive ? 'active' : ''}`}
+        onClick={onToggleLive}
+        title="Toggle live 'happening now' reports"
+      >
+        <Radio size={16} />
+        <span>Live reports</span>
+      </button>
+      <button
         className={`gm-layer-btn ${showEvents ? 'active' : ''}`}
         onClick={onToggleEvents}
         title="Toggle event pins on the map"
@@ -87,6 +99,10 @@ export default function MapLayersFab({
         <span>Event pins</span>
       </button>
       <div className="gm-layer-divider" />
+      <button className="gm-layer-btn" onClick={onOpenLive} title="Live reports feed">
+        <Radio size={16} />
+        <span>Happening now</span>
+      </button>
       <button className="gm-layer-btn" onClick={onOpenEvents} title="Upcoming events in Kochi">
         <CalendarDays size={16} />
         <span>Events in Kochi</span>

@@ -79,6 +79,7 @@ def _local_load() -> dict:
     store.setdefault("brochures", {})
     store.setdefault("contributors", {})
     store.setdefault("ratings", {})
+    store.setdefault("live", {})
     return store
 
 
@@ -410,6 +411,59 @@ def update_rating(rating_id: str, updates: dict) -> Optional[dict]:
     store["ratings"][rating_id].update(updates)
     _local_save(store)
     return store["ratings"][rating_id]
+
+
+# --- Live reports ("happening now" — short-lived, geo-tagged) ---
+
+def get_all_live_reports() -> List[dict]:
+    if _try_init_firestore():
+        return [doc.to_dict() for doc in _firestore_client.collection("live_reports").stream()]
+    return list(_local_load()["live"].values())
+
+
+def get_live_report(report_id: str) -> Optional[dict]:
+    if _try_init_firestore():
+        doc = _firestore_client.collection("live_reports").document(report_id).get()
+        return doc.to_dict() if doc.exists else None
+    return _local_load()["live"].get(report_id)
+
+
+def create_live_report(report: dict) -> dict:
+    report_id = report.get("report_id") or f"live_{uuid.uuid4().hex[:10]}"
+    now = datetime.now(timezone.utc).isoformat()
+    report = {
+        "still_there": 0,
+        "still_there_by": [],
+        "cleared": False,
+        "comments": [],
+        **report,
+        "report_id": report_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if _try_init_firestore():
+        _firestore_client.collection("live_reports").document(report_id).set(report)
+        return report
+    store = _local_load()
+    store["live"][report_id] = report
+    _local_save(store)
+    return report
+
+
+def update_live_report(report_id: str, updates: dict) -> Optional[dict]:
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if _try_init_firestore():
+        ref = _firestore_client.collection("live_reports").document(report_id)
+        if not ref.get().exists:
+            return None
+        ref.update(updates)
+        return ref.get().to_dict()
+    store = _local_load()
+    if report_id not in store["live"]:
+        return None
+    store["live"][report_id].update(updates)
+    _local_save(store)
+    return store["live"][report_id]
 
 
 def bulk_create_segments(segments: List[dict]) -> int:

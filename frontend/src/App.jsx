@@ -12,6 +12,7 @@ import AddFeaturePanel from './components/AddFeaturePanel';
 import RoadAssessmentPanel from './components/RoadAssessmentPanel';
 import MunicipalityReport from './components/MunicipalityReport';
 import EventsPanel from './components/EventsPanel';
+import LivePanel from './components/LivePanel';
 import AddEventPanel from './components/AddEventPanel';
 import SurveyPanel from './components/SurveyPanel';
 import SosButton from './components/SosButton';
@@ -46,6 +47,9 @@ export default function App() {
   const [showEvents, setShowEvents] = useState(false);
   const [showPotholeZones, setShowPotholeZones] = useState(false);
   const [showRatings, setShowRatings] = useState(false);
+  const [showLive, setShowLive] = useState(false);
+  const [liveFocusId, setLiveFocusId] = useState(null);
+  const [liveVersion, setLiveVersion] = useState(0);
   const [contributionVersion, setContributionVersion] = useState(0);
 
   // Identity
@@ -475,6 +479,20 @@ export default function App() {
           />
         )}
 
+        {panelMode === 'live' && (
+          <LivePanel
+            location={userLocation}
+            focusId={liveFocusId}
+            contributorName={contributorName}
+            onBack={() => {
+              setLiveFocusId(null);
+              setPanelMode('search');
+            }}
+            onLocate={() => locateMe(true)}
+            onChanged={() => setLiveVersion((v) => v + 1)}
+          />
+        )}
+
         {panelMode === 'survey' && (
           <SurveyPanel
             context={surveyCtx}
@@ -512,6 +530,9 @@ export default function App() {
         onTogglePotholeZones={() => setShowPotholeZones(!showPotholeZones)}
         showRatings={showRatings}
         onToggleRatings={() => setShowRatings(!showRatings)}
+        showLive={showLive}
+        onToggleLive={() => setShowLive(!showLive)}
+        onOpenLive={() => setPanelMode('live')}
         onOpenEvents={() => setPanelMode('events')}
         onOpenReport={() => setReportOpen(true)}
       />
@@ -551,9 +572,15 @@ export default function App() {
           showPotholeZones={showPotholeZones}
           showRatings={showRatings}
           ratingsReloadKey={contributionVersion}
+          showLive={showLive || Boolean(routesData)}
+          liveReloadKey={liveVersion}
           onMapClick={handleMapClick}
           onFeatureClick={(f) => handleMapClick({ lat: f.lat, lng: f.lng })}
           onSpotClick={(s) => handleMapClick({ lat: s.lat, lng: s.lng })}
+          onLiveClick={(r) => {
+            setLiveFocusId(r.report_id);
+            setPanelMode('live');
+          }}
           onEventClick={(e) => showOnMap(e.lat, e.lng, { noPanel: true, zoom: 15 })}
           onRouteSelect={setSelectedRouteIdx}
           markerLocation={markerLocation}

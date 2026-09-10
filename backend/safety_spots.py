@@ -89,19 +89,27 @@ def _nearest_spot(lat: float, lng: float, spots: list):
     return best
 
 
-def _recent_comments(members: list) -> list:
-    comments = sorted(
-        (m for m in members if (m.get("comment") or "").strip()),
-        key=lambda m: m.get("created_at") or "", reverse=True,
-    )[:3]
-    return [{
+def _comment_view(m: dict) -> dict:
+    return {
         "score": m["score"],
         "comment": m["comment"],
         "tags": m.get("tags", []),
         "by": "Anonymous" if m.get("visibility") == "anonymous"
               else (m.get("contributor") or {}).get("name") or m.get("contributed_by") or "Anonymous",
         "at": m.get("created_at"),
-    } for m in comments]
+    }
+
+
+def _all_comments(members: list) -> list:
+    ordered = sorted(
+        (m for m in members if (m.get("comment") or "").strip()),
+        key=lambda m: m.get("created_at") or "", reverse=True,
+    )
+    return [_comment_view(m) for m in ordered]
+
+
+def _recent_comments(members: list) -> list:
+    return _all_comments(members)[:3]
 
 
 def resolve_spot(lat: float, lng: float, ratings: list, hour: int) -> dict:
@@ -128,3 +136,37 @@ def spot_containing_rating(rating_id: str, ratings: list, hour: int):
 
 def all_spots(ratings: list, hour: int) -> list:
     return [summarize_spot(sp, hour) for sp in cluster_spots(ratings)]
+
+
+def spots_along_route(encoded_polyline: str, ratings: list, hour: int = 22,
+                      radius_m: float = 45.0) -> list:
+    """Rating spots that sit on a route's path — a rating counts if it's within
+    `radius_m` of any point on the decoded polyline. Returns per-spot summaries
+    with the full comment list, worst-felt spot first."""
+    from agent.scoring_engine import _decode_polyline
+
+    path = _decode_polyline(encoded_polyline)
+    if not path or not ratings:
+        return []
+    step = max(1, len(path) // 400)
+    thinned = path[::step]
+
+    on_route = []
+    for r in ratings:
+        if "lat" not in r or "lng" not in r:
+            continue
+        rlat, rlng = r["lat"], r["lng"]
+        # cheap bounding pre-filter, then the real distance check
+        if any(abs(p[0] - rlat) < 0.002 and abs(p[1] - rlng) < 0.002 for p in thinned):
+            if min(_haversine_m(rlat, rlng, p[0], p[1]) for p in thinned) <= radius_m:
+                on_route.append(r)
+    if not on_route:
+        return []
+
+    out = []
+    for sp in cluster_spots(on_route):
+        summary = summarize_spot(sp, hour)
+        summary["comments"] = _all_comments(sp["members"])
+        out.append(summary)
+    out.sort(key=lambda s: s["mean"] if s["mean"] is not None else 5.0)
+    return out
