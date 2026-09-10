@@ -43,20 +43,20 @@ export default function MapLayersFab({
         <span>Safety score</span>
       </button>
       <button
+        className={`gm-layer-btn ${showPolice ? 'active' : ''}`}
+        onClick={onTogglePolice}
+        title="Toggle police station markers"
+      >
+        <Siren size={16} />
+        <span>Police stations</span>
+      </button>
+      <button
         className={`gm-layer-btn ${showFeatures ? 'active' : ''}`}
         onClick={onToggleFeatures}
-        title="Toggle community streetlight & note pins"
+        title="Toggle community streetlight, pothole & note pins (fixed ones hidden)"
       >
         <MapPin size={16} />
         <span>Streetlights &amp; notes</span>
-      </button>
-      <button
-        className={`gm-layer-btn ${showPolice ? 'active' : ''}`}
-        onClick={onTogglePolice}
-        title="Toggle police help points"
-      >
-        <Siren size={16} />
-        <span>Police &amp; help</span>
       </button>
       <button
         className={`gm-layer-btn ${showLighting ? 'active' : ''}`}

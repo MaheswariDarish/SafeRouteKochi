@@ -101,6 +101,7 @@ def decorate(report, now=None) -> dict:
         "still_there": report.get("still_there", 0),
         "age_min": age_min,
         "minutes_left": mins_left,
+        "photo_url": f"/api/live/{report.get('report_id')}/photo" if report.get("photo") else None,
         "created_at": report.get("created_at"),
         "updated_at": report.get("updated_at"),
         "comments": [_comment_view(c) for c in report.get("comments", [])],

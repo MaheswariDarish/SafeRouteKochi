@@ -116,6 +116,15 @@ class NewFeatureInput(BaseModel):
     visibility: Literal["public", "anonymous"] = "public"
 
 
+class FeatureEditInput(BaseModel):
+    """Correct an existing point. Only the given fields change; a `type` change
+    is only honoured within the streetlight family (working / broken / missing).
+    Every edit is appended to the feature's event log with the editor's name."""
+    type: Optional[FeatureType] = None
+    note: Optional[str] = Field(None, max_length=280)
+    severity: Optional[int] = Field(None, ge=1, le=3)
+
+
 # Short, fixed vocabulary of "what's wrong here" tags a rater can attach.
 SafetyTag = Literal[
     "poor_lighting",

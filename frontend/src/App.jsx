@@ -13,6 +13,7 @@ import RoadAssessmentPanel from './components/RoadAssessmentPanel';
 import MunicipalityReport from './components/MunicipalityReport';
 import EventsPanel from './components/EventsPanel';
 import LivePanel from './components/LivePanel';
+import MapLegend from './components/MapLegend';
 import AddEventPanel from './components/AddEventPanel';
 import SurveyPanel from './components/SurveyPanel';
 import SosButton from './components/SosButton';
@@ -41,15 +42,18 @@ export default function App() {
 
   // Layer toggles
   const [showSafety, setShowSafety] = useState(true);
-  const [showPolice, setShowPolice] = useState(false);
+  const [showPolice, setShowPolice] = useState(true);
   const [showLighting, setShowLighting] = useState(false);
-  const [showFeatures, setShowFeatures] = useState(true);
+  const [showFeatures, setShowFeatures] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
   const [showPotholeZones, setShowPotholeZones] = useState(false);
   const [showRatings, setShowRatings] = useState(false);
   const [showLive, setShowLive] = useState(false);
   const [liveFocusId, setLiveFocusId] = useState(null);
   const [liveVersion, setLiveVersion] = useState(0);
+  const [livePicking, setLivePicking] = useState(false);
+  const [liveAutoCompose, setLiveAutoCompose] = useState(false);
+  const [liveCameFromPlace, setLiveCameFromPlace] = useState(false);
   const [contributionVersion, setContributionVersion] = useState(0);
 
   // Identity
@@ -139,9 +143,19 @@ export default function App() {
   };
   const contributorName = (firebaseConfigured ? user?.name : devName) || 'Anonymous';
 
-  // Contributions are anonymous by default — never block on identity. Signing
-  // in (Header button) is optional and just attributes future contributions.
-  const ensureIdentity = useCallback(async () => true, []);
+  // Contributions are anonymous by default. When the backend enforces auth
+  // (`AUTH_ENFORCED` + Firebase), a contribution action first triggers the
+  // Google popup and only proceeds once signed in.
+  const ensureIdentity = useCallback(async () => {
+    if (!firebaseConfigured || !config?.auth_enforced) return true;
+    if (user) return true;
+    try {
+      await signInWithGoogle();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [config, user]);
 
   // Ask for the user's location once, quietly.
   const locateMe = useCallback((recenter = false) => {
@@ -276,11 +290,17 @@ export default function App() {
   };
 
   const handleMapClick = (loc) => {
-    if (panelMode === 'contribute' || panelMode === 'addevent') {
+    if (panelMode === 'contribute' || panelMode === 'addevent' || livePicking) {
       setDraftCoord({ lat: loc.lat, lng: loc.lng });
       return;
     }
-    setSelectedPlace({ placeId: loc.placeId || null, lat: loc.lat, lng: loc.lng });
+    setSelectedPlace({
+      placeId: loc.placeId || null,
+      lat: loc.lat,
+      lng: loc.lng,
+      fromFeature: loc.fromFeature || false,
+      featureId: loc.featureId || null,
+    });
     setPanelMode('place');
   };
 
@@ -320,7 +340,7 @@ export default function App() {
   const hasGoogleMapsKey = Boolean(config?.google_maps_api_key);
   const routeList = routesData?.routes || [];
   const activeRoute = routeList[selectedRouteIdx] || routesData?.route_b || null;
-  const isPickMode = panelMode === 'contribute' || panelMode === 'addevent';
+  const isPickMode = panelMode === 'contribute' || panelMode === 'addevent' || livePicking;
   const markerLocation =
     isPickMode
       ? draftCoord
@@ -425,6 +445,14 @@ export default function App() {
             onContribute={() => openContribute()}
             onDetailedAssessment={openAssess}
             onConfirmFeature={afterContribution}
+            onReportLive={(coord) => {
+              setDraftCoord(coord);
+              setLivePicking(false);
+              setLiveAutoCompose(true);
+              setLiveFocusId(null);
+              setLiveCameFromPlace(true);
+              setPanelMode('live');
+            }}
             ensureIdentity={ensureIdentity}
             contributorName={contributorName}
           />
@@ -484,9 +512,22 @@ export default function App() {
             location={userLocation}
             focusId={liveFocusId}
             contributorName={contributorName}
+            pickedCoord={draftCoord}
+            picking={livePicking}
+            autoCompose={liveAutoCompose}
+            onAutoComposeConsumed={() => setLiveAutoCompose(false)}
+            onStartPick={() => {
+              setDraftCoord(null);
+              setLivePicking(true);
+            }}
+            onStopPick={() => setLivePicking(false)}
             onBack={() => {
               setLiveFocusId(null);
-              setPanelMode('search');
+              setLivePicking(false);
+              setLiveAutoCompose(false);
+              const back = liveCameFromPlace && selectedPlace;
+              setLiveCameFromPlace(false);
+              setPanelMode(back ? 'place' : 'search');
             }}
             onLocate={() => locateMe(true)}
             onChanged={() => setLiveVersion((v) => v + 1)}
@@ -537,6 +578,16 @@ export default function App() {
         onOpenReport={() => setReportOpen(true)}
       />
 
+      <MapLegend
+        showFeatures={showFeatures}
+        showRatings={showRatings}
+        showLive={showLive}
+        showEvents={eventsVisible}
+        showPolice={showPolice}
+        showLighting={showLighting}
+        hasRoutes={Boolean(routesData)}
+      />
+
       <SosButton onClick={() => setPanelMode('sos')} />
 
       <button
@@ -551,6 +602,8 @@ export default function App() {
         <div className="gm-pick-hint">
           {panelMode === 'addevent'
             ? 'Click the map where the event is'
+            : livePicking
+            ? 'Click the map where it’s happening'
             : 'Click the map on the exact spot'}
         </div>
       )}
@@ -575,8 +628,15 @@ export default function App() {
           showLive={showLive || Boolean(routesData)}
           liveReloadKey={liveVersion}
           onMapClick={handleMapClick}
-          onFeatureClick={(f) => handleMapClick({ lat: f.lat, lng: f.lng })}
-          onSpotClick={(s) => handleMapClick({ lat: s.lat, lng: s.lng })}
+          onFeatureClick={(f) =>
+            handleMapClick({
+              lat: f.lat,
+              lng: f.lng,
+              fromFeature: true,
+              featureId: f.feature_id,
+            })
+          }
+          onSpotClick={(s) => handleMapClick({ lat: s.lat, lng: s.lng, fromFeature: true })}
           onLiveClick={(r) => {
             setLiveFocusId(r.report_id);
             setPanelMode('live');

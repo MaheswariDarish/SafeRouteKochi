@@ -17,8 +17,10 @@ dist-ssr
 *.env
 .env.*
 !.env.example
-*.serviceAccount.json
+*serviceAccount*.json
 serviceAccountKey.json
+secrets/
+backend/secrets/
 
 # Python
 __pycache__/

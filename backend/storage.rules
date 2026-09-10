@@ -1,0 +1,15 @@
+rules_version = '2';
+
+// SafeRoute Cloud Storage rules.
+//
+// All uploads go through the FastAPI backend using the Firebase Admin SDK,
+// which BYPASSES these rules. Direct client access is denied — the app reads
+// files via signed URLs the backend mints (GET /api/.../photo | /brochure).
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

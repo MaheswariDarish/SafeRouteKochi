@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { FEATURE_STYLE } from '../lib/featureStyles';
+import {
+  pinIcon,
+  FEATURE_GLYPH,
+  LIVE_GLYPH,
+  EVENT_GLYPH,
+  POLICE_GLYPH,
+} from '../lib/mapIcons';
 
 const mapContainerStyle = { width: '100%', height: '100%' };
 const defaultCenter = { lat: 9.9816, lng: 76.2999 };
@@ -246,16 +253,9 @@ export default function GoogleMapView({
         const marker = new g.Marker({
           map,
           position: { lat: r.lat, lng: r.lng },
-          zIndex: 40,
-          opacity: 0.45 + 0.55 * fresh,
-          icon: {
-            path: g.SymbolPath.CIRCLE,
-            scale: alert ? 9 : 7,
-            fillColor: colour,
-            fillOpacity: 1,
-            strokeColor: '#fff',
-            strokeWeight: 2,
-          },
+          zIndex: 45,
+          opacity: 0.5 + 0.5 * fresh,
+          icon: pinIcon(colour, LIVE_GLYPH[r.category] || LIVE_GLYPH.other),
           title: `${r.category_label} · ${
             r.age_min < 1 ? 'just now' : `${r.age_min} min ago`
           }${r.note ? ` — ${r.note}` : ''}`,
@@ -425,34 +425,36 @@ export default function GoogleMapView({
         />
       )}
 
+      {/* Police stations are their own layer (below). Fixed reports are hidden. */}
       {showFeatures &&
-        features.map((f) => {
-          const style = FEATURE_STYLE[f.type] || FEATURE_STYLE.other;
-          const resolved = f.status === 'resolved';
-          const isPolice = f.type === 'police_station';
-          const title = isPolice
-            ? `${f.note || 'Police station'}${f.jurisdiction ? `\n${f.jurisdiction}` : ''}`
-            : `${style.label}${f.note ? ` — ${f.note}` : ''}${resolved ? ' (resolved)' : ''}`;
-          return (
+        features
+          .filter((f) => f.type !== 'police_station' && f.status !== 'resolved')
+          .map((f) => {
+            const style = FEATURE_STYLE[f.type] || FEATURE_STYLE.other;
+            return (
+              <Marker
+                key={f.feature_id}
+                position={{ lat: f.lat, lng: f.lng }}
+                onClick={() => onFeatureClick && onFeatureClick(f)}
+                title={`${style.label}${f.note ? ` — ${f.note}` : ''}`}
+                icon={pinIcon(style.color, FEATURE_GLYPH[f.type] || FEATURE_GLYPH.other)}
+              />
+            );
+          })}
+
+      {showPolice &&
+        features
+          .filter((f) => f.type === 'police_station')
+          .map((f) => (
             <Marker
               key={f.feature_id}
               position={{ lat: f.lat, lng: f.lng }}
               onClick={() => onFeatureClick && onFeatureClick(f)}
-              title={title}
-              zIndex={isPolice ? 40 : undefined}
-              icon={{
-                path: isPolice
-                  ? window.google.maps.SymbolPath.BACKWARD_CLOSED_ARROW
-                  : window.google.maps.SymbolPath.CIRCLE,
-                scale: isPolice ? 5 : 6,
-                fillColor: style.color,
-                fillOpacity: resolved ? 0.3 : 0.95,
-                strokeColor: '#ffffff',
-                strokeWeight: isPolice ? 2 : 1.5,
-              }}
+              title={`${f.note || 'Police station'}${f.jurisdiction ? `\n${f.jurisdiction}` : ''}`}
+              zIndex={40}
+              icon={pinIcon('#1a73e8', POLICE_GLYPH)}
             />
-          );
-        })}
+          ))}
 
       {events.map((e) => (
         <Marker
@@ -460,14 +462,7 @@ export default function GoogleMapView({
           position={{ lat: e.lat, lng: e.lng }}
           onClick={() => onEventClick && onEventClick(e)}
           title={`${e.title} — ${e.venue}`}
-          icon={{
-            path: window.google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
-            scale: 5,
-            fillColor: '#9334e6',
-            fillOpacity: 0.95,
-            strokeColor: '#ffffff',
-            strokeWeight: 1.5,
-          }}
+          icon={pinIcon('#9334e6', EVENT_GLYPH)}
         />
       ))}
 
@@ -486,25 +481,6 @@ export default function GoogleMapView({
           }}
         />
       )}
-
-      {showPolice &&
-        segments
-          .filter((s) => s.police_station_distance_m <= 500)
-          .map((seg) => (
-            <Marker
-              key={`pol-${seg.segment_id}`}
-              position={{ lat: seg.lat + 0.0004, lng: seg.lng + 0.0004 }}
-              title={`Police help point near ${seg.road_name}`}
-              icon={{
-                path: window.google.maps.SymbolPath.CIRCLE,
-                scale: 7,
-                fillColor: '#1a73e8',
-                fillOpacity: 1,
-                strokeColor: '#ffffff',
-                strokeWeight: 2,
-              }}
-            />
-          ))}
 
       {showLighting &&
         segments

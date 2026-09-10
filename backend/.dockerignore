@@ -1,0 +1,17 @@
+# Secrets & local-only state — never bake into the image
+.env
+.env.*
+secrets/
+data/_local_emulation_store.json
+data/uploads/
+
+# Python cruft
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Docs / misc
+*.md
+.DS_Store

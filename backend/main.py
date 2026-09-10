@@ -12,7 +12,8 @@ load_dotenv(dotenv_path=env_path)
 
 from routes import router as saferoute_router
 from agent.gemini_client import is_gemini_configured
-from auth import is_auth_enforced
+from auth import is_auth_enforced, firebase_ready
+from data.data_access import is_using_firestore
 
 
 def _firebase_web_config():
@@ -56,8 +57,9 @@ def get_client_config():
     return {
         "google_maps_api_key": os.environ.get("GOOGLE_MAPS_API_KEY", ""),
         "has_gemini": is_gemini_configured(),
-        "has_firestore": bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")),
-        "firebase": _firebase_web_config(),
+        "has_firestore": is_using_firestore(),   # datastore actually on Firestore
+        "has_auth": firebase_ready(),            # Admin SDK up — ID tokens verified
+        "firebase": _firebase_web_config(),      # web SDK config for the frontend
         "auth_enforced": is_auth_enforced(),
     }
 

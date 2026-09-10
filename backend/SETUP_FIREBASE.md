@@ -39,28 +39,57 @@ FIREBASE_STORAGE_BUCKET=your-project-id.appspot.com
 `GET /api/config` serves these to the frontend, which then shows **Sign in with
 Google** and attaches the token to contributions.
 
-## 4. (Optional) Security rules
+## 4. Security rules
 
-`firestore.rules` locks down direct client access (all writes go through the
-backend). Deploy with the Firebase CLI:
+`backend/firestore.rules` locks down direct client access — the browser may read
+verified public map data, everything else (surveys, contributors, **safety
+ratings**, **live reports**) is backend-only. All writes go through the FastAPI
+backend via the Admin SDK, which bypasses these rules. `firebase.json` at the
+repo root points the CLI at the rules + `backend/firestore.indexes.json` (no
+composite indexes are needed yet). Deploy from the repo root:
 
 ```
 npm i -g firebase-tools
 firebase login
-firebase deploy --only firestore:rules --project your-project-id
+firebase use --add                  # pick your project, alias it "default"
+firebase deploy --only firestore:rules
 ```
 
 ## 5. Seed data
 
 ```
-cd backend && python seed.py        # pushes the curated Kochi segments + a few police stations
+cd backend && python seed.py        # pushes the curated Kochi segments + police stations to Firestore
 ```
+
+## 6. (Optional) Require sign-in
+
+By default sign-in is *available but optional* even with Firebase on — anonymous
+/ dev-name contributions still work. To make every contribution require a valid
+Google token, set in `backend/.env`:
+
+```
+AUTH_ENFORCED=true
+```
+
+Write endpoints then return `401` without a token. `GET /api/config` `auth_enforced`
+and `GET /api/status` `auth` reflect the current mode.
+
+## Verify it took
+
+```
+curl -s localhost:8000/api/status | python -m json.tool
+```
+
+Expect `"database": "Firestore"`, `"firestore_connected": true`, and an `auth`
+line matching your `AUTH_ENFORCED` choice. `GET /api/config` should return a
+`firebase` object (not `null`) and the frontend header should show
+**Sign in with Google**.
 
 ## Behaviour summary
 
-| | No Firebase (default) | Firebase configured |
-|---|---|---|
-| Storage | `data/_local_emulation_store.json` | Firestore |
-| Identity | local "dev name" prompt, never blocks | Google Sign-In required to contribute |
-| `GET /api/config` `firebase` | `null` | web config object |
-| Write without token | attributed "Local dev" | `401` |
+| | No Firebase (default) | Firebase, `AUTH_ENFORCED` unset | Firebase + `AUTH_ENFORCED=true` |
+|---|---|---|---|
+| Storage | `data/_local_emulation_store.json` | Firestore | Firestore |
+| Identity | local "dev name", never blocks | Google sign-in optional | Google sign-in required |
+| `GET /api/config` `firebase` | `null` | web config object | web config object |
+| Write without token | attributed "Local dev" | attributed "Anonymous" | `401` |

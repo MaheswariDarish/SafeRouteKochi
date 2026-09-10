@@ -1,32 +1,39 @@
 """
 Contributor identity for SafeRoute.
 
-Contributions are **anonymous by default** — no sign-in is required and an
-unauthenticated write is never rejected; it's simply attributed to "Anonymous"
-(or an `X-Contributor-Name` header, if the client sends one).
+Default: **anonymous-friendly**. No sign-in is required and an unauthenticated
+write is never rejected — it's attributed to "Anonymous" (or an
+`X-Contributor-Name` header, if the client sends one). When Firebase is
+configured and the client sends a valid `Authorization: Bearer <idToken>`, the
+real Google identity is attached instead.
 
-Signing in is still *optional*: when Firebase is configured and the client
-sends a valid `Authorization: Bearer <idToken>`, the real Google identity is
-attached to the contribution instead. Flip this back to enforced later by
-raising a 401 when `firebase_ready()` and no valid token is present.
+Set `AUTH_ENFORCED=true` (only meaningful once Firebase is configured) to flip
+to sign-in-required: contribution endpoints then 401 without a valid token.
 """
 
+import os
 import re
 from typing import Optional
 
-from fastapi import Header
+from fastapi import Header, HTTPException
 
-from data.data_access import is_using_firestore
+from data.data_access import firebase_app_ready
 
 
 def firebase_ready() -> bool:
-    """True when the Firebase Admin SDK is available (Firestore configured)."""
-    return is_using_firestore()
+    """True when the Firebase Admin SDK is initialised — i.e. ID tokens can be
+    verified. This is independent of whether Firestore is the datastore, so
+    sign-in works even before the Firestore database is created."""
+    return firebase_app_ready()
 
 
-# Kept for backwards compatibility with older imports; auth is not enforced.
+def _enforce_flag() -> bool:
+    return os.environ.get("AUTH_ENFORCED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def is_auth_enforced() -> bool:
-    return False
+    """Sign-in required? Only when Firebase is up AND AUTH_ENFORCED is set."""
+    return firebase_ready() and _enforce_flag()
 
 
 def _slug(name: str) -> str:
@@ -38,7 +45,8 @@ def get_current_user(
     x_contributor_name: Optional[str] = Header(default=None),
 ) -> dict:
     """FastAPI dependency. Returns {uid, name, email, picture, admin, mode}.
-    Never raises — an unauthenticated caller is "Anonymous"."""
+    Raises 401 only when AUTH_ENFORCED is set and no valid token is present;
+    otherwise an unauthenticated caller is "Anonymous"."""
     if firebase_ready() and authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
         try:
@@ -54,7 +62,12 @@ def get_current_user(
                 "mode": "firebase",
             }
         except Exception as e:  # noqa: BLE001
-            print("[auth] token verification failed — treating as anonymous:", e)
+            print("[auth] token verification failed:", e)
+            if is_auth_enforced():
+                raise HTTPException(status_code=401, detail="Invalid or expired sign-in token")
+
+    if is_auth_enforced():
+        raise HTTPException(status_code=401, detail="Sign in to contribute")
 
     name = (x_contributor_name or "").strip()
     if name and name.lower() != "anonymous":

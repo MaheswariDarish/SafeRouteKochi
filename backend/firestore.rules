@@ -19,9 +19,13 @@ service cloud.firestore {
     match /map_features/{id}   { allow read: if isVerified(); allow write: if false; }
     match /community_events/{id} { allow read: if isVerified(); allow write: if false; }
 
-    // Everything else is backend-only.
-    match /trip_surveys/{id}   { allow read, write: if false; }
-    match /contributors/{id}   { allow read, write: if false; }
+    // Everything else is backend-only. The API already serves these to the
+    // browser with rater/reporter identity stripped for anonymous entries, so
+    // raw docs (which still carry contributor.uid) must not be client-readable.
+    match /trip_surveys/{id}    { allow read, write: if false; }
+    match /contributors/{id}    { allow read, write: if false; }
+    match /safety_ratings/{id}  { allow read, write: if false; }
+    match /live_reports/{id}    { allow read, write: if false; }
     match /event_brochures/{id} { allow read: if true; allow write: if false; }
 
     match /{document=**} { allow read, write: if false; }

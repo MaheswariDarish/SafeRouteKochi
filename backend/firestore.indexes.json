@@ -1,0 +1,5 @@
+{
+  "//": "SafeRoute queries are all single-field (.where('type'==) / .where('status'==)) or full-collection streams, which Firestore auto-indexes. No composite indexes needed yet. Add entries here if a future query combines a filter with an order_by.",
+  "indexes": [],
+  "fieldOverrides": []
+}

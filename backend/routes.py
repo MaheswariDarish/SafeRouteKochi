@@ -6,11 +6,12 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Any
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Depends
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 
-from auth import get_current_user
+import storage as file_storage
+from auth import get_current_user, is_auth_enforced, firebase_ready
 from safety_spots import (
     resolve_spot,
     spot_containing_rating,
@@ -68,6 +69,7 @@ from schemas.schemas import (
     NewRatingInput,
     NewLiveReportInput,
     LiveCommentInput,
+    FeatureEditInput,
 )
 
 UPLOAD_DIR = Path(__file__).resolve().parent / "data" / "uploads" / "events"
@@ -79,6 +81,44 @@ BROCHURE_CONTENT_TYPES = {
     "application/pdf": ".pdf",
 }
 BROCHURE_MAX_BYTES = 6 * 1024 * 1024
+
+LIVE_PHOTO_DIR = Path(__file__).resolve().parent / "data" / "uploads" / "live"
+LIVE_PHOTO_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+LIVE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _store_upload(local_dir: Path, name: str, prefix: str, body: bytes, content_type: str) -> None:
+    """Firebase Storage when available, else local disk."""
+    if file_storage.upload(f"{prefix}/{name}", body, content_type):
+        return
+    local_dir.mkdir(parents=True, exist_ok=True)
+    (local_dir / name).write_bytes(body)
+
+
+def _remove_upload(local_dir: Path, name: str, prefix: str) -> None:
+    if not name:
+        return
+    p = local_dir / name
+    if p.exists():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    file_storage.delete(f"{prefix}/{name}")
+
+
+def _serve_upload(local_path: Path, object_path: str, content_type: Optional[str] = None):
+    """Legacy disk files first, then Firebase Storage (redirect to a signed URL,
+    or stream the bytes if signing isn't available)."""
+    if local_path.exists():
+        return FileResponse(local_path, media_type=content_type or "application/octet-stream")
+    url = file_storage.signed_url(object_path)
+    if url:
+        return RedirectResponse(url, status_code=307)
+    got = file_storage.fetch(object_path)
+    if got:
+        return Response(content=got[0], media_type=content_type or got[1])
+    raise HTTPException(status_code=404, detail="File not found")
 
 router = APIRouter(prefix="/api", tags=["saferoute"])
 
@@ -494,13 +534,25 @@ def _find_safe_corridor(input_data: WaypointRouteInput):
 @router.get("/status")
 def get_status():
     segments = get_all_segments()
+    on_firestore = is_using_firestore()
+    auth_up = firebase_ready()
     return {
-        "database": "Firestore" if is_using_firestore() else "Local emulation",
+        "database": "Firestore" if on_firestore else "Local emulation",
+        "firestore_connected": on_firestore,
+        "storage": "Firebase Storage" if file_storage.enabled() else "local disk",
+        "auth": (
+            "Firebase — sign-in required" if is_auth_enforced()
+            else "Firebase sign-in available (optional)" if auth_up
+            else "open — dev name / anonymous"
+        ),
+        "google_maps_key": bool(os.environ.get("GOOGLE_MAPS_API_KEY")),
+        "has_gemini": is_gemini_configured(),
         "segment_count": len(segments),
         "feature_count": len(get_all_features()),
+        "rating_count": len(get_all_ratings()),
+        "live_report_count": len(get_all_live_reports()),
         "survey_count": len(get_all_surveys()),
         "community_event_count": len([e for e in get_all_community_events() if e.get("category") != "Report"]),
-        "has_gemini": is_gemini_configured(),
     }
 
 
@@ -678,19 +730,15 @@ async def upload_event_brochure(
     if len(body) > BROCHURE_MAX_BYTES:
         raise HTTPException(status_code=400, detail="File too large (max 6 MB).")
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     ext = BROCHURE_CONTENT_TYPES[file.content_type]
     # Randomised filename so an old cached copy can't be requested after replacement.
     stored_name = f"{event_id}__{uuid.uuid4().hex[:8]}{ext}"
 
-    # Remove any previous file for this event before writing the new one.
     old = get_brochure(event_id)
     if old and old.get("stored_name"):
-        old_path = UPLOAD_DIR / old["stored_name"]
-        if old_path.exists():
-            old_path.unlink()
+        _remove_upload(UPLOAD_DIR, old["stored_name"], "events")
 
-    (UPLOAD_DIR / stored_name).write_bytes(body)
+    _store_upload(UPLOAD_DIR, stored_name, "events", body, file.content_type)
     record = set_brochure(event_id, {
         "stored_name": stored_name,
         "content_type": file.content_type,
@@ -705,10 +753,8 @@ def get_event_brochure(event_id: str):
     record = get_brochure(event_id)
     if not record:
         raise HTTPException(status_code=404, detail="No brochure uploaded for this event.")
-    path = UPLOAD_DIR / record["stored_name"]
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Brochure file missing.")
-    return FileResponse(path, media_type=record.get("content_type", "application/octet-stream"))
+    name = record["stored_name"]
+    return _serve_upload(UPLOAD_DIR / name, f"events/{name}", record.get("content_type"))
 
 
 # --- Trip surveys ---
@@ -947,6 +993,51 @@ def reopen_feature(feature_id: str, payload: ConfirmInput = ConfirmInput(),
     return _append_feature_event(feat, "reappeared", contributor, note=payload.note)
 
 
+@router.post("/features/{feature_id}/update")
+def edit_feature(feature_id: str, payload: FeatureEditInput,
+                 user: dict = Depends(get_current_user)):
+    """Correct an existing point — its state (streetlight working/broken/missing),
+    severity or note. Logged to the feature's event trail with the editor."""
+    feat = get_feature(feature_id)
+    if not feat:
+        raise HTTPException(status_code=404, detail="Feature not found")
+
+    data = payload.model_dump(exclude_none=True)
+    updates: dict = {}
+    changed: list = []
+
+    new_type = data.get("type")
+    if new_type and new_type != feat.get("type"):
+        old = feat.get("type")
+        if old in _STREETLIGHT_FAMILY and new_type in _STREETLIGHT_FAMILY:
+            updates["type"] = new_type
+            changed.append(f"state → {new_type.replace('streetlight_', '')}")
+        else:
+            raise HTTPException(status_code=400,
+                                detail="type can only change within the streetlight family")
+
+    if "note" in data and (data["note"] or "") != (feat.get("note") or ""):
+        updates["note"] = data["note"]
+        changed.append("note")
+
+    if data.get("severity") and data["severity"] != feat.get("severity"):
+        updates["severity"] = data["severity"]
+        changed.append(f"severity {data['severity']}")
+
+    if not updates:
+        return feat
+
+    now = datetime.now(timezone.utc).isoformat()
+    updates["events"] = list(feat.get("events", [])) + [{
+        "at": now,
+        "kind": "edited",
+        "by": {"uid": user["uid"], "name": user.get("name")},
+        "note": ", ".join(changed),
+    }]
+    updates["last_activity_at"] = now
+    return update_feature(feature_id, updates)
+
+
 # --- Community safety ratings (subjective "how safe does this feel") ---
 
 _RATING_NEARBY_M = 120  # only for the flat GET /ratings list
@@ -1039,11 +1130,21 @@ def live_categories():
 
 
 @router.get("/live")
-def list_live(bbox: Optional[str] = Query(None, description="min_lng,min_lat,max_lng,max_lat"),
-              since: Optional[str] = Query(None, description="ISO cursor — only reports updated after this")):
-    """Active (non-expired, non-cleared) reports. Poll this; `cursor` in the
-    response is the value to pass as `since` next time. SSE can layer on later
-    without changing the shape."""
+def list_live(
+    bbox: Optional[str] = Query(None, description="min_lng,min_lat,max_lng,max_lat — for the map view"),
+    lat: Optional[float] = Query(None, description="viewer location — filters to `radius_m` and adds distance_m"),
+    lng: Optional[float] = Query(None),
+    radius_m: int = Query(3000, ge=100, le=50000),
+    since: Optional[str] = Query(None, description="ISO cursor — only reports updated after this"),
+):
+    """Active (non-expired, non-cleared) reports.
+
+    - no location  -> everything active, newest first
+    - lat & lng    -> only within `radius_m`, each tagged `distance_m`, nearest first
+    - bbox         -> only inside the box (map viewport)
+
+    `cursor` in the response is what to pass as `since` next poll. SSE can layer
+    on later without changing this shape."""
     reports = get_all_live_reports()
     if bbox:
         try:
@@ -1052,13 +1153,28 @@ def list_live(bbox: Optional[str] = Query(None, description="min_lng,min_lat,max
                 reports = live.in_bbox(reports, tuple(parts))
         except ValueError:
             pass
+
     out = live.active_decorated(reports)
+
+    if lat is not None and lng is not None:
+        near = []
+        for r in out:
+            if r.get("lat") is None or r.get("lng") is None:
+                continue
+            d = _haversine_m(lat, lng, r["lat"], r["lng"])
+            if d <= radius_m:
+                near.append({**r, "distance_m": round(d)})
+        near.sort(key=lambda r: r["distance_m"])
+        out = near
+
     if since:
         out = [r for r in out if (r.get("updated_at") or "") > since]
+
     return {
         "reports": out,
         "cursor": datetime.now(timezone.utc).isoformat(),
         "count": len(out),
+        "radius_m": radius_m if (lat is not None and lng is not None) else None,
     }
 
 
@@ -1126,6 +1242,37 @@ def comment_live_report(report_id: str, payload: LiveCommentInput,
     return live.decorate(updated)
 
 
+@router.post("/live/{report_id}/photo")
+async def upload_live_photo(report_id: str, file: UploadFile = File(...),
+                            user: dict = Depends(get_current_user)):
+    """Attach one photo to a live report (replaces any existing one)."""
+    r = get_live_report(report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if file.content_type not in LIVE_PHOTO_TYPES:
+        raise HTTPException(status_code=400, detail="Use a JPG, PNG or WEBP image.")
+    body = await file.read()
+    if len(body) > LIVE_PHOTO_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Image too large (max 5 MB).")
+
+    stored = f"{report_id}__{uuid.uuid4().hex[:8]}{LIVE_PHOTO_TYPES[file.content_type]}"
+    old = r.get("photo")
+    if old and old != stored:
+        _remove_upload(LIVE_PHOTO_DIR, old, "live")
+    _store_upload(LIVE_PHOTO_DIR, stored, "live", body, file.content_type)
+
+    return live.decorate(update_live_report(report_id, {"photo": stored}))
+
+
+@router.get("/live/{report_id}/photo")
+def get_live_photo(report_id: str):
+    r = get_live_report(report_id)
+    stored = (r or {}).get("photo")
+    if not stored:
+        raise HTTPException(status_code=404, detail="No photo")
+    return _serve_upload(LIVE_PHOTO_DIR / stored, f"live/{stored}")
+
+
 # --- Place context (hybrid: reverse geocode + local safety data) ---
 
 @router.get("/places/context")
@@ -1174,18 +1321,20 @@ def place_context(lat: float = Query(...), lng: float = Query(...)):
     police_candidates = []
     _SPECIALISED = ("women", "vanitha", "tourism", "coastal", "cyber", "traffic", "railway")
     for f in get_all_features():
-        if f.get("status") == "resolved":
-            continue
+        resolved = f.get("status") == "resolved"
         d = _haversine_m(lat, lng, f["lat"], f["lng"])
-        if f.get("type") == "police_station" and f.get("status") == "verified":
+        if not resolved and f.get("type") == "police_station" and f.get("status") == "verified":
             specialised = (
                 f.get("jurisdiction_scope") in ("city_wide", "railway")
                 or any(w in (f.get("note") or "").lower() for w in _SPECIALISED)
             )
             police_candidates.append({**f, "distance_m": round(d), "_specialised": specialised})
         if d <= 150:
+            # Resolved items still show (so "report it's back" is possible) but
+            # don't count toward the active tally.
             nearby_features.append({**f, "distance_m": round(d)})
-            tally[f["type"]] = tally.get(f["type"], 0) + 1
+            if not resolved:
+                tally[f["type"]] = tally.get(f["type"], 0) + 1
 
     general = [p for p in police_candidates if not p["_specialised"]]
     pool = general or police_candidates

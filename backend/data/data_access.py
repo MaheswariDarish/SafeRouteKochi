@@ -14,6 +14,7 @@ reads/writes go to real Firestore with no code changes needed.
 import os
 import json
 import uuid
+import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -30,6 +31,58 @@ ALWAYS_VERIFIED_FEATURE_TYPES = {"police_station"}
 
 _firestore_client = None
 _firestore_enabled: Optional[bool] = None
+_firebase_app_ready: Optional[bool] = None
+# Lazy init runs on the first request; the frontend fires several at once, so
+# guard it — otherwise racers hit "default app already exists" and poison the
+# cached result.
+_init_lock = threading.RLock()
+
+
+def _ensure_firebase_app() -> bool:
+    """Initialise the Firebase Admin SDK. Uses GOOGLE_APPLICATION_CREDENTIALS if
+    it points at a key file (local dev); otherwise falls back to Application
+    Default Credentials (Cloud Run / GCE run as the service's own account, no key
+    file). Independent of whether Firestore is usable — this is what Auth needs."""
+    global _firebase_app_ready
+    if _firebase_app_ready is not None:
+        return _firebase_app_ready
+
+    with _init_lock:
+        if _firebase_app_ready is not None:
+            return _firebase_app_ready
+
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        has_key_file = bool(creds_path and os.path.exists(creds_path))
+        # Local dev with neither a key file nor gcloud ADC → straight to the
+        # local store, no noisy DefaultCredentialsError.
+        if not has_key_file and not (
+            os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("K_SERVICE")  # set by Cloud Run
+            or os.path.exists(os.path.expanduser("~/.config/gcloud/application_default_credentials.json"))
+        ):
+            _firebase_app_ready = False
+            return False
+        try:
+            import firebase_admin
+            from firebase_admin import credentials
+
+            try:
+                firebase_admin.get_app()  # already initialised by another caller?
+            except ValueError:
+                if has_key_file:
+                    firebase_admin.initialize_app(credentials.Certificate(creds_path))
+                else:
+                    firebase_admin.initialize_app()  # Application Default Credentials
+            _firebase_app_ready = True
+            print("[data_access] Firebase Admin SDK initialised (Auth ready).")
+        except Exception as e:  # noqa: BLE001
+            print(f"[data_access] Firebase Admin init failed ({e}).")
+            _firebase_app_ready = False
+        return _firebase_app_ready
+
+
+def firebase_app_ready() -> bool:
+    return _ensure_firebase_app()
 
 
 def _try_init_firestore() -> bool:
@@ -37,28 +90,31 @@ def _try_init_firestore() -> bool:
     if _firestore_enabled is not None:
         return _firestore_enabled
 
-    creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if not creds_path or not os.path.exists(creds_path):
-        print("[data_access] No GOOGLE_APPLICATION_CREDENTIALS found — "
-              "running in LOCAL EMULATION mode, not real Firestore.")
-        _firestore_enabled = False
-        return False
+    with _init_lock:
+        if _firestore_enabled is not None:
+            return _firestore_enabled
 
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
+        if not _ensure_firebase_app():
+            print("[data_access] No Firebase credentials — LOCAL EMULATION store.")
+            _firestore_enabled = False
+            return False
 
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(creds_path)
-            firebase_admin.initialize_app(cred)
-        _firestore_client = firestore.client()
-        _firestore_enabled = True
-        print("[data_access] Connected to Firestore.")
-    except Exception as e:
-        print(f"[data_access] Firestore init failed ({e}) — falling back to LOCAL EMULATION mode.")
-        _firestore_enabled = False
+        try:
+            from firebase_admin import firestore
 
-    return _firestore_enabled
+            client = firestore.client()
+            # Health check: does the (default) database actually exist? A missing
+            # DB raises NotFound here rather than on every later call.
+            next(client.collection("_healthcheck").limit(1).stream(), None)
+            _firestore_client = client
+            _firestore_enabled = True
+            print("[data_access] Connected to Firestore.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[data_access] Firestore not usable ({e}) — using LOCAL EMULATION "
+                  "store; Firebase Auth still works. Create the database and restart.")
+            _firestore_enabled = False
+
+        return _firestore_enabled
 
 
 def is_using_firestore() -> bool:

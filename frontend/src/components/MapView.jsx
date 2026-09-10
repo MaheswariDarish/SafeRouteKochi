@@ -108,23 +108,26 @@ export default function MapView({
   useEffect(() => {
     if (!featuresLayerRef.current) return;
     featuresLayerRef.current.clearLayers();
-    if (!showFeatures) return;
     features.forEach((f) => {
-      const color = FEATURE_COLORS[f.type] || FEATURE_COLORS.other;
+      const isPolice = f.type === 'police_station';
+      // Police stations = their own layer; fixed reports are hidden.
+      if (isPolice ? !showPolice : !showFeatures || f.status === 'resolved') return;
+      const color = isPolice ? '#1a73e8' : FEATURE_COLORS[f.type] || FEATURE_COLORS.other;
       const marker = L.circleMarker([f.lat, f.lng], {
-        radius: 6,
+        radius: isPolice ? 7 : 6,
         fillColor: color,
         color: '#fff',
         weight: 1.5,
-        fillOpacity: f.status === 'resolved' ? 0.3 : 0.95,
+        fillOpacity: 0.95,
       });
       marker.bindPopup(
-        `<strong>${(f.type || '').replace(/_/g, ' ')}</strong><br>${f.note || ''}` +
-          `<br><span style="color:#5f6368;font-size:12px;">${f.status}</span>`
+        isPolice
+          ? `<strong>${f.note || 'Police station'}</strong><br>${f.jurisdiction || ''}`
+          : `<strong>${(f.type || '').replace(/_/g, ' ')}</strong><br>${f.note || ''}`
       );
       featuresLayerRef.current.addLayer(marker);
     });
-  }, [features, showFeatures]);
+  }, [features, showFeatures, showPolice]);
 
   useEffect(() => {
     if (!segmentsLayerRef.current) return;
@@ -166,17 +169,6 @@ export default function MapView({
         segmentsLayerRef.current.addLayer(marker);
       }
 
-      if (showPolice && seg.police_station_distance_m <= 500) {
-        const policeIcon = L.divIcon({
-          className: 'gm-leaflet-marker',
-          html: `<div style="background:#1a73e8;color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(0,0,0,0.3);font-size:11px;">P</div>`,
-          iconSize: [22, 22],
-        });
-        const pm = L.marker([seg.lat + 0.0004, seg.lng + 0.0004], { icon: policeIcon });
-        pm.bindPopup(`<b>Police help point</b><br>${seg.road_name}`);
-        segmentsLayerRef.current.addLayer(pm);
-      }
-
       if (showLighting && seg.lighting_score >= 8.0) {
         const lightIcon = L.divIcon({
           className: 'gm-leaflet-marker',
@@ -188,7 +180,7 @@ export default function MapView({
         segmentsLayerRef.current.addLayer(lm);
       }
     });
-  }, [segments, showSafety, showPolice, showLighting, hour]);
+  }, [segments, showSafety, showLighting, hour]);
 
   useEffect(() => {
     if (!routesLayerRef.current) return;
